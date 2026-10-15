@@ -42,18 +42,24 @@ class AuditLog:
                         last = line
             if last:
                 self._prev = json.loads(last)["hash"]
+        # Line-buffered: each record reaches the OS as soon as it is written.
+        self._file = self.path.open("a", buffering=1, encoding="utf-8") if self.path else None
 
     def event(self, kind: str, **fields: Any) -> dict[str, Any]:
         body = {"ts": time.time(), "kind": kind, **fields}
         with self._lock:
             record = {**body, "prev": self._prev, "hash": _digest(self._prev, body)}
             self._prev = record["hash"]
-            if self.path:
-                with self.path.open("a") as f:
-                    f.write(json.dumps(record, default=str) + "\n")
+            if self._file:
+                self._file.write(json.dumps(record, default=str) + "\n")
             else:
                 self.records.append(record)
         return record
+
+    def close(self) -> None:
+        if self._file:
+            self._file.close()
+            self._file = None
 
     def decision(self, d: Decision) -> dict[str, Any]:
         return self.event(
@@ -70,6 +76,9 @@ class AuditLog:
 
 class NullAudit(AuditLog):
     """Discards everything. For benchmarks only."""
+
+    def __init__(self) -> None:
+        super().__init__(None)
 
     def event(self, kind: str, **fields: Any) -> dict[str, Any]:
         return {}

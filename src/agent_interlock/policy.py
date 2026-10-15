@@ -7,6 +7,8 @@ at call time.
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import math
 import re
 import tomllib
@@ -98,15 +100,20 @@ class Policy:
     violation_window_s: float = 300.0
     estop_blocks: frozenset[str] = frozenset({"actuate"})
     tools: dict[str, ToolRule] = field(default_factory=dict)
+    digest: str = ""  # sha256 of the source text, recorded in the audit trail
 
     @classmethod
     def from_file(cls, path: str | Path) -> Policy:
-        with open(path, "rb") as f:
-            return cls.from_dict(tomllib.load(f))
+        return cls.from_toml(Path(path).read_text(encoding="utf-8"))
 
     @classmethod
     def from_toml(cls, text: str) -> Policy:
-        return cls.from_dict(tomllib.loads(text))
+        try:
+            data = tomllib.loads(text)
+        except tomllib.TOMLDecodeError as e:
+            raise PolicyError(f"TOML: {e}") from None
+        policy = cls.from_dict(data)
+        return dataclasses.replace(policy, digest=hashlib.sha256(text.encode()).hexdigest())
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Policy:
@@ -151,6 +158,15 @@ def _tool_rule(name: str, spec: dict[str, Any]) -> ToolRule:
             bounds[axis] = (float(min(rng)), float(max(rng)))
         if not bounds:
             raise PolicyError(f"{where}.keepout[{box_name}] has no axes")
+        for axis in bounds:
+            # An optional or untyped axis would let the agent skip the zone
+            # check by leaving the argument out or passing a string.
+            p = params.get(axis)
+            if p is None or not p.required or p.type not in ("number", "int"):
+                raise PolicyError(
+                    f"{where}.keepout[{box_name}].{axis}: axis must be a required "
+                    f'param with type = "number" or "int"'
+                )
         keepout.append(KeepOut(box_name, bounds))
 
     rate = None
@@ -164,6 +180,10 @@ def _tool_rule(name: str, spec: dict[str, Any]) -> ToolRule:
             raise PolicyError(f"{where}.rate must have max >= 1 and per_s > 0")
 
     agents = spec.get("agents")
+    if agents is not None and not (
+        isinstance(agents, list) and all(isinstance(a, str) and a for a in agents)
+    ):
+        raise PolicyError(f"{where}.agents must be a list of agent names")
     return ToolRule(
         name=name,
         tool_class=tool_class,

@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         python: ["3.11", "3.13"]
-        extras: ["dev", "dev,adk"]
+        extras: ["dev", "dev,adk,mcp"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7

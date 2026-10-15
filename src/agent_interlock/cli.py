@@ -1,4 +1,4 @@
-"""Command line: validate policies, dry-run calls, verify audit logs, benchmark."""
+"""Command line: validate policies, dry-run calls, run the MCP gateway, operate latches."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from . import audit
 from .decision import ToolCall
 from .engine import Interlock
 from .policy import Policy, PolicyError
+from .state import LatchStore
 
 
 def _validate(a: argparse.Namespace) -> int:
@@ -72,6 +73,44 @@ def _bench(a: argparse.Namespace) -> int:
     return 0
 
 
+def _mcp_proxy(a: argparse.Namespace) -> int:
+    from .mcp_gateway import McpGateway, run_stdio
+
+    if not a.command:
+        print("interlock mcp-proxy: give the server command after --", file=sys.stderr)
+        return 2
+    il = Interlock(
+        Policy.from_file(a.policy),
+        audit=audit.AuditLog(a.audit),
+        state_path=a.state,
+    )
+    gw = McpGateway(il, agent=a.agent, hide_unlisted=not a.show_all)
+    return run_stdio(gw, a.command, policy_path=a.policy)
+
+
+def _latch_op(a: argparse.Namespace) -> int:
+    store = LatchStore(a.state)
+    log = audit.AuditLog(a.audit) if a.audit else None
+    if a.cmd == "status":
+        locked, estop = store.load()
+        print(json.dumps({"estop": estop, "locked_out": locked}, indent=2))
+        return 0
+    if a.cmd == "estop":
+        store.update(lambda locked, _: (locked, f"{a.reason or 'stop'} (from {a.source})"))
+        if log:
+            log.event("estop", source=a.source, reason=a.reason)
+    elif a.cmd == "reset":
+        store.update(lambda locked, _: (locked, None))
+        if log:
+            log.event("estop_reset", operator=a.operator)
+    elif a.cmd == "release":
+        store.update(lambda locked, e: ({k: v for k, v in locked.items() if k != a.agent}, e))
+        if log:
+            log.event("release", agent=a.agent, operator=a.operator)
+    print(f"{a.cmd}: done")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="interlock", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -97,7 +136,36 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("log")
     r.set_defaults(fn=_verify)
 
+    m = sub.add_parser("mcp-proxy", help="gate a stdio MCP server: ... -- <server command>")
+    m.add_argument("--policy", required=True)
+    m.add_argument("--agent", default="mcp-client", help="agent identity used in the policy")
+    m.add_argument("--audit", default="interlock-audit.jsonl")
+    m.add_argument("--state", default=None, help="shared latch file (lockouts, E-stop)")
+    m.add_argument("--show-all", action="store_true", help="don't hide tools missing from policy")
+    m.add_argument("command", nargs=argparse.REMAINDER)
+    m.set_defaults(fn=_mcp_proxy)
+
+    for name, helptext in (
+        ("status", "show latched E-stop and lockouts"),
+        ("estop", "latch the E-stop for every interlock sharing the state file"),
+        ("reset", "reset the E-stop"),
+        ("release", "release a locked-out agent"),
+    ):
+        o = sub.add_parser(name, help=helptext)
+        o.add_argument("--state", required=True)
+        o.add_argument("--audit", default=None)
+        if name == "estop":
+            o.add_argument("--source", default="cli")
+            o.add_argument("--reason", default="")
+        if name in ("reset", "release"):
+            o.add_argument("--operator", required=True)
+        if name == "release":
+            o.add_argument("--agent", required=True)
+        o.set_defaults(fn=_latch_op)
+
     a = ap.parse_args(argv)
+    if a.cmd == "mcp-proxy" and a.command[:1] == ["--"]:
+        a.command = a.command[1:]
     return a.fn(a)
 
 

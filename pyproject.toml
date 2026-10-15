@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-interlock"
-version = "0.1.0"
+version = "0.2.0"
 description = "Safety interlock for AI agent tool calls: policy-gated, fail-closed, with lockout, E-stop and a tamper-evident audit trail."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -20,6 +20,7 @@ dependencies = []  # core is stdlib-only (tomllib needs 3.11+)
 
 [project.optional-dependencies]
 adk = ["google-adk>=2.0"]
+mcp = ["mcp>=2.3"]  # only for examples/mcp_robot_server.py and the SDK interop test
 dev = ["pytest>=8", "ruff>=0.6"]
 
 [project.scripts]

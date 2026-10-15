@@ -237,10 +237,12 @@ def test_audit_chain_detects_tampering(tmp_path, clock):
     move(il, speed=9.0)
     il.estop(source="plc")
     records = load(log)
-    assert len(records) == 3 and verify(records) == (True, None)
+    assert [r["kind"] for r in records] == ["start", "decision", "decision", "estop"]
+    assert records[0]["policy"] == il.policy.digest != ""
+    assert verify(records) == (True, None)
 
-    records[1]["verdict"] = "allow"  # someone hides the denial
-    assert verify(records) == (False, 1)
+    records[2]["verdict"] = "allow"  # someone hides the denial
+    assert verify(records) == (False, 2)
 
     lines = log.read_text().splitlines()
     del lines[0]  # someone deletes a record
@@ -293,3 +295,97 @@ def test_cli(capsys, tmp_path):
     bad = tmp_path / "bad.toml"
     bad.write_text('[tools.t]\nclass = "nope"')
     assert cli(["validate", str(bad)]) == 1
+
+
+# ------------------------------------------------- iteration 2: latch state
+
+
+def test_lockout_and_estop_survive_restart(tmp_path):
+    state = tmp_path / "latch.json"
+    il = Interlock(Policy.from_file(CELL), state_path=state)
+    for _ in range(3):
+        move(il, speed=5.0)
+    il.estop(source="plc", reason="door open")
+
+    il2 = Interlock(Policy.from_file(CELL), state_path=state)  # process restart
+    assert "a1" in il2.locked_out()
+    assert il2.estop_latched
+    assert move(il2, agent="a2").verdict is Verdict.LOCKOUT
+
+    il2.release("a1", operator="ops")
+    il2.reset_estop(operator="ops")
+    il3 = Interlock(Policy.from_file(CELL), state_path=state)
+    assert il3.locked_out() == {} and not il3.estop_latched
+
+
+def test_corrupt_state_file_latches_estop(tmp_path):
+    state = tmp_path / "latch.json"
+    state.write_text("{not json")
+    il = Interlock(Policy.from_file(CELL), state_path=state)
+    assert il.estop_latched
+    assert move(il).verdict is Verdict.LOCKOUT
+    assert il.check(ToolCall("a1", "read_joint_states", {})).allowed
+
+
+def test_reload_keeps_latches_and_is_audited(il):
+    il.estop(source="plc")
+    stricter = Policy.from_toml(CELL.read_text().replace("max = 0.25", "max = 0.05"))
+    il.reload(stricter, operator="ops")
+    assert il.estop_latched
+    il.reset_estop(operator="ops")
+    assert move(il, speed=0.1).rule == "param:speed"
+    ev = [r for r in il.audit.records if r["kind"] == "policy_reload"][0]
+    assert ev["new"] == stricter.digest and ev["old"] != ev["new"]
+    with pytest.raises(ValueError):
+        il.reload(stricter, operator="")
+
+
+def test_operator_rejection_enforced_in_observe_mode():
+    il = Interlock(observe_policy(), approver=lambda c: False)
+    d = il.check(ToolCall("a1", "load_program", {"name": "pick_v2"}))
+    assert d.verdict is Verdict.DENY and d.enforced and not d.allowed
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        'params.x = { type = "number", required = false }',  # optional axis
+        "params.x = { min = 0, max = 1 }",  # untyped axis
+        "",  # undeclared axis
+    ],
+)
+def test_keepout_axis_must_be_required_number(params):
+    toml = f'[tools.t]\nclass = "actuate"\n{params}\n[[tools.t.keepout]]\nx = [0, 1]'
+    with pytest.raises(PolicyError, match="axis must be"):
+        Policy.from_toml(toml)
+
+
+@pytest.mark.parametrize("agents", ['"ops"', "[1]", '[""]'])
+def test_agents_must_be_list_of_names(agents):
+    with pytest.raises(PolicyError, match="agents"):
+        Policy.from_toml(f'[tools.t]\nclass = "read"\nagents = {agents}')
+
+
+def test_bad_toml_is_policy_error():
+    with pytest.raises(PolicyError, match="TOML"):
+        Policy.from_toml("[[[")
+
+
+def test_estop_from_another_process_is_seen_on_next_check(tmp_path):
+    state = tmp_path / "latch.json"
+    gateway_a = Interlock(Policy.from_file(CELL), state_path=state)
+    gateway_b = Interlock(Policy.from_file(CELL), state_path=state)
+    assert move(gateway_a).allowed
+    gateway_b.estop(source="plc")
+    assert move(gateway_a).verdict is Verdict.LOCKOUT
+    gateway_a.lockout("a9", operator="ops")
+    assert "a9" in gateway_b.locked_out()  # B's E-stop was not lost by A's write
+    assert gateway_b.estop_latched
+
+
+def test_deleting_state_file_does_not_clear_estop(tmp_path):
+    state = tmp_path / "latch.json"
+    il = Interlock(Policy.from_file(CELL), state_path=state)
+    il.estop(source="plc")
+    state.unlink()
+    assert move(il).verdict is Verdict.LOCKOUT

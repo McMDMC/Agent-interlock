@@ -24,8 +24,10 @@ from typing import Any
 from .audit import AuditLog
 from .decision import Decision, ToolCall, Verdict
 from .policy import Policy
+from .state import LatchStore
 
 Approver = Callable[[ToolCall], bool]
+_KEEP = object()
 
 
 class Interlock:
@@ -35,6 +37,7 @@ class Interlock:
         audit: AuditLog | None = None,
         approver: Approver | None = None,
         clock: Callable[[], float] = time.monotonic,
+        state_path: str | Path | None = None,
     ) -> None:
         self.policy = policy
         self.audit = audit if audit is not None else AuditLog()
@@ -43,8 +46,18 @@ class Interlock:
         self._lock = threading.Lock()
         self._calls: dict[tuple[str, str], deque[float]] = defaultdict(deque)
         self._violations: dict[str, deque[float]] = defaultdict(deque)
+        self._store = LatchStore(state_path) if state_path else None
         self._locked_out: dict[str, str] = {}  # agent -> reason
         self._estop: str | None = None
+        if self._store:
+            self._locked_out, self._estop = self._store.load()
+        self.audit.event(
+            "start",
+            policy=policy.digest,
+            mode=policy.mode,
+            locked_out=sorted(self._locked_out),
+            estop=self._estop,
+        )
 
     @classmethod
     def from_file(cls, path: str | Path, **kw: Any) -> Interlock:
@@ -55,6 +68,7 @@ class Interlock:
     def check(self, call: ToolCall) -> Decision:
         t0 = time.perf_counter()
         with self._lock:
+            self._sync()
             verdict, rule, reason = self._evaluate(call)
             # Lockouts and E-stops are hard stops: observe mode never overrides them.
             enforced = self.policy.mode == "enforce" or verdict is Verdict.LOCKOUT
@@ -66,7 +80,9 @@ class Interlock:
             if self.approver(call):
                 verdict, rule, reason = Verdict.ALLOW, "approval", "approved by operator"
             else:
+                # A human said no. That holds in observe mode too.
                 verdict, rule, reason = Verdict.DENY, "approval", "rejected by operator"
+                enforced = True
         d = Decision(
             verdict=verdict,
             reason=reason,
@@ -135,19 +151,55 @@ class Interlock:
         while v and now - v[0] > self.policy.violation_window_s:
             v.popleft()
         if len(v) >= limit:
-            self._locked_out[agent] = f"{len(v)} violations, last: {reason}"
+            why = f"{len(v)} violations, last: {reason}"
             v.clear()
-            self.audit.event("lockout", agent=agent, reason=self._locked_out[agent])
+            self._latch(lock=(agent, why))
+            self.audit.event("lockout", agent=agent, reason=why)
+
+    # The two helpers below are called with self._lock held.
+
+    def _sync(self) -> None:
+        """Pick up latch changes made by other processes sharing the state file."""
+        if self._store and (latches := self._store.refresh()) is not None:
+            self._locked_out, self._estop = latches
+
+    def _latch(
+        self,
+        lock: tuple[str, str] | None = None,
+        unlock: str | None = None,
+        estop: str | None | object = _KEEP,
+    ) -> None:
+        def apply(locked: dict[str, str], current: str | None) -> tuple[dict[str, str], str | None]:
+            if lock:
+                locked[lock[0]] = lock[1]
+            if unlock:
+                locked.pop(unlock, None)
+            return locked, current if estop is _KEEP else estop  # type: ignore[return-value]
+
+        if self._store:
+            self._locked_out, self._estop = self._store.update(apply)
+        else:
+            self._locked_out, self._estop = apply(self._locked_out, self._estop)
 
     # ------------------------------------------------------- operator actions
 
+    def reload(self, policy: Policy, operator: str) -> None:
+        """Swap in a new policy without a restart. Lockouts and the E-stop stay latched."""
+        if not operator:
+            raise ValueError("policy reload needs a named operator")
+        with self._lock:
+            old = self.policy.digest
+            self.policy = policy
+            self.audit.event("policy_reload", operator=operator, old=old, new=policy.digest)
+
     def locked_out(self) -> dict[str, str]:
         with self._lock:
+            self._sync()
             return dict(self._locked_out)
 
     def lockout(self, agent: str, operator: str, reason: str = "manual") -> None:
         with self._lock:
-            self._locked_out[agent] = f"{reason} (by {operator})"
+            self._latch(lock=(agent, f"{reason} (by {operator})"))
             self.audit.event("lockout", agent=agent, operator=operator, reason=reason)
 
     def release(self, agent: str, operator: str) -> bool:
@@ -155,24 +207,28 @@ class Interlock:
         if not operator:
             raise ValueError("release needs a named operator")
         with self._lock:
-            if self._locked_out.pop(agent, None) is None:
+            self._sync()
+            if agent not in self._locked_out:
                 return False
+            self._latch(unlock=agent)
             self._violations.pop(agent, None)
             self.audit.event("release", agent=agent, operator=operator)
             return True
 
     @property
     def estop_latched(self) -> bool:
-        return self._estop is not None
+        with self._lock:
+            self._sync()
+            return self._estop is not None
 
     def estop(self, source: str, reason: str = "") -> None:
         with self._lock:
-            self._estop = f"{reason or 'stop'} (from {source})"
+            self._latch(estop=f"{reason or 'stop'} (from {source})")
             self.audit.event("estop", source=source, reason=reason)
 
     def reset_estop(self, operator: str) -> None:
         if not operator:
             raise ValueError("E-stop reset needs a named operator")
         with self._lock:
-            self._estop = None
+            self._latch(estop=None)
             self.audit.event("estop_reset", operator=operator)
