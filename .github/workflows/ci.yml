@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+        extras: ["dev", "dev,adk"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[${{ matrix.extras }}]"
+      - run: ruff check . && ruff format --check .
+      - run: pytest -q
+      - run: interlock validate policies/robot_cell.toml
+      - run: python examples/robot_cell_demo.py
+      - run: interlock bench policies/robot_cell.toml --tool move_arm --args '{"x":0.1,"y":0.1,"z":0.4,"speed":0.1}'

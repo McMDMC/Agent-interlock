@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-interlock"
+version = "0.1.0"
+description = "Safety interlock for AI agent tool calls: policy-gated, fail-closed, with lockout, E-stop and a tamper-evident audit trail."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "McMDMC" }]
+keywords = ["ai-agents", "guardrails", "tool-calling", "mcp", "adk", "robotics", "safety"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Topic :: Security",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = []  # core is stdlib-only (tomllib needs 3.11+)
+
+[project.optional-dependencies]
+adk = ["google-adk>=2.0"]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+interlock = "agent_interlock.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_interlock"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

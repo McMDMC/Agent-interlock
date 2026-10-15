@@ -1,0 +1,52 @@
+# Example policy: one agent driving a 6-axis arm and a conveyor in a work cell.
+# Units: metres, m/s, degrees. Limits here are illustrative. Take real values
+# from the cell's risk assessment, not from this file.
+
+[interlock]
+mode = "enforce"            # "observe" = log only (E-stop and lockouts still enforced)
+lockout_after = 3           # violations inside the window before the agent is locked out
+violation_window_s = 300
+estop_blocks = ["actuate"]  # tool classes frozen while the E-stop is latched
+
+# --- read: sensors, no side effects -----------------------------------------
+[tools.read_joint_states]
+class = "read"
+
+[tools.read_sensor]
+class = "read"
+params.sensor = { enum = ["force_torque", "light_curtain", "temp_spindle"] }
+
+# --- actuate: anything that moves -------------------------------------------
+[tools.move_arm]
+class = "actuate"
+rate = { max = 5, per_s = 1 }
+params.x = { type = "number", min = -0.60, max = 0.60 }
+params.y = { type = "number", min = -0.60, max = 0.60 }
+params.z = { type = "number", min = 0.05, max = 0.90 }  # never below the table surface
+params.speed = { type = "number", min = 0.0, max = 0.25 }
+
+[[tools.move_arm.keepout]]
+name = "operator_station"
+x = [0.30, 0.60]
+y = [-0.20, 0.20]
+z = [0.05, 0.90]
+
+[tools.set_gripper]
+class = "actuate"
+params.width_mm = { type = "number", min = 0, max = 85 }
+params.force_n = { type = "number", min = 0, max = 40 }
+
+[tools.set_conveyor]
+class = "actuate"
+params.speed = { type = "number", min = 0.0, max = 0.5 }
+params.direction = { enum = ["forward", "reverse"], required = false }
+
+# --- write: changes state that outlives the call ----------------------------
+[tools.load_program]
+class = "write"
+require_approval = true     # a human signs off before new robot code is loaded
+params.name = { type = "string", pattern = "[A-Za-z0-9_\\-]{1,64}" }
+
+[tools.write_log_note]
+class = "write"
+params.text = { type = "string", max_len = 500 }
