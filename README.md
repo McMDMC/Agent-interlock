@@ -19,6 +19,8 @@ LLM agent ──tool_call──▶  INTERLOCK  ──allow──▶  tool / devi
                            └─▶ audit.jsonl (SHA-256 chain)
 ```
 
+Architecture diagrams (modules, check pipeline, MCP session): [docs/architecture.md](docs/architecture.md)
+
 ## Why
 
 Prompt filters stop bad *text*. On a machine, what does the damage is the
