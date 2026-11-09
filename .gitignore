@@ -7,3 +7,5 @@ build/
 .pytest_cache/
 .ruff_cache/
 audit.jsonl
+cell-latch.json
+cell-latch.json.lock

@@ -81,6 +81,48 @@ class RateLimit:
     per_s: float
 
 
+_MISSING = object()
+
+
+@dataclass(frozen=True, slots=True)
+class Trip:
+    """A safety condition read from a tool's *result*. When it fires, the E-stop latches.
+
+    The physical analogue is a sensor wired into the safety circuit: a light
+    curtain that breaks, a force/torque reading over the limit. Wiring is
+    normally-closed, so a reading that is missing or not a usable value also
+    trips. No signal is treated as a stop signal.
+    """
+
+    name: str
+    field: str  # dotted path into the result, e.g. "value" or "reading.force_n"
+    values: tuple[Any, ...] | None = None  # trip if the value is one of these
+    min: float | None = None  # trip if the value is below min ...
+    max: float | None = None  # ... or above max
+    when: tuple[tuple[str, Any], ...] = ()  # only applies if the call args match exactly
+
+    def applies(self, args: dict[str, Any]) -> bool:
+        return all(k in args and args[k] == v for k, v in self.when)
+
+    def check(self, result: Any) -> str | None:
+        """Return why this trip fires for ``result``, or None."""
+        value: Any = result if isinstance(result, dict) else {"result": result}
+        for key in self.field.split("."):
+            value = value.get(key, _MISSING) if isinstance(value, dict) else _MISSING
+            if value is _MISSING:
+                return f"{self.field} missing from tool result"
+        if self.values is not None and value in self.values:
+            return f"{self.field}={value!r}"
+        if self.min is not None or self.max is not None:
+            if not _is_number(value) or not math.isfinite(value):
+                return f"{self.field}={value!r} is not a finite number"
+            if self.min is not None and value < self.min:
+                return f"{self.field}={value} below {self.min}"
+            if self.max is not None and value > self.max:
+                return f"{self.field}={value} above {self.max}"
+        return None
+
+
 @dataclass(frozen=True, slots=True)
 class ToolRule:
     name: str
@@ -91,6 +133,7 @@ class ToolRule:
     require_approval: bool = False
     strict: bool = True  # reject args that are not declared in params
     agents: frozenset[str] | None = None  # None = any agent
+    trips: tuple[Trip, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +142,7 @@ class Policy:
     lockout_after: int = 3
     violation_window_s: float = 300.0
     estop_blocks: frozenset[str] = frozenset({"actuate"})
+    estop_on_fault: frozenset[str] = frozenset({"actuate"})  # a tool of these classes raising
     tools: dict[str, ToolRule] = field(default_factory=dict)
     digest: str = ""  # sha256 of the source text, recorded in the audit trail
 
@@ -127,12 +171,16 @@ class Policy:
         estop_blocks = frozenset(head.get("estop_blocks", ["actuate"]))
         if bad := estop_blocks - set(TOOL_CLASSES):
             raise PolicyError(f"interlock.estop_blocks has unknown classes {sorted(bad)}")
+        estop_on_fault = frozenset(head.get("estop_on_fault", ["actuate"]))
+        if bad := estop_on_fault - set(TOOL_CLASSES):
+            raise PolicyError(f"interlock.estop_on_fault has unknown classes {sorted(bad)}")
         tools = {name: _tool_rule(name, spec) for name, spec in data.get("tools", {}).items()}
         return cls(
             mode=mode,
             lockout_after=lockout_after,
             violation_window_s=float(head.get("violation_window_s", 300)),
             estop_blocks=estop_blocks,
+            estop_on_fault=estop_on_fault,
             tools=tools,
         )
 
@@ -193,6 +241,47 @@ def _tool_rule(name: str, spec: dict[str, Any]) -> ToolRule:
         require_approval=bool(spec.get("require_approval", False)),
         strict=bool(spec.get("strict", True)),
         agents=frozenset(agents) if agents is not None else None,
+        trips=tuple(
+            _trip(f"{where}.trip", i, t, params) for i, t in enumerate(spec.get("trip", []))
+        ),
+    )
+
+
+def _trip(where: str, i: int, spec: dict[str, Any], params: dict[str, ParamRule]) -> Trip:
+    known = {"name", "field", "in", "min", "max", "when"}
+    if not isinstance(spec, dict):
+        raise PolicyError(f"{where}[{i}] must be a table")
+    if extra := set(spec) - known:
+        raise PolicyError(f"{where}[{i}]: unknown keys {sorted(extra)}")
+    name = spec.get("name", f"trip{i}")
+    where = f"{where}[{name}]"
+    field_ = spec.get("field")
+    if not isinstance(field_, str) or not field_ or "" in field_.split("."):
+        raise PolicyError(f"{where}.field must be a non-empty dotted key")
+    values = spec.get("in")
+    if values is not None and not (isinstance(values, list) and values):
+        raise PolicyError(f"{where}.in must be a non-empty list")
+    lo, hi = spec.get("min"), spec.get("max")
+    for k, v in (("min", lo), ("max", hi)):
+        if v is not None and not _is_number(v):
+            raise PolicyError(f"{where}.{k} must be a number")
+    if lo is not None and hi is not None and lo > hi:
+        raise PolicyError(f"{where}: min {lo} > max {hi}")
+    if values is None and lo is None and hi is None:
+        raise PolicyError(f"{where} needs at least one of in, min, max")
+    when = spec.get("when", {})
+    if not isinstance(when, dict):
+        raise PolicyError(f"{where}.when must be a table of arg = value")
+    # A typo in `when` would silently disarm the trip. Fail at load instead.
+    if bad := set(when) - set(params):
+        raise PolicyError(f"{where}.when uses undeclared params {sorted(bad)}")
+    return Trip(
+        name=name,
+        field=field_,
+        values=tuple(values) if values is not None else None,
+        min=lo,
+        max=hi,
+        when=tuple(sorted(when.items())),
     )
 
 

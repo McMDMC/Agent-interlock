@@ -67,7 +67,7 @@ d.verdict, d.reason  # (Verdict.DENY, "target inside keep-out zone 'operator_sta
 def move_arm(x: float, y: float, z: float, speed: float): ...
 ```
 
-### Google ADK (tested against google-adk 2.12.0)
+### Google ADK (tested against google-adk 2.14.0)
 
 One plugin on the `App` gates every tool of every agent. A blocked call
 returns its reason to the model as the tool result, so the agent can
@@ -80,9 +80,35 @@ from agent_interlock.adapters.adk import InterlockPlugin
 app = App(name="robot_cell", root_agent=agent, plugins=[InterlockPlugin(il)])
 ```
 
-Per-agent alternative: `LlmAgent(before_tool_callback=before_tool_callback(il))`.
+The plugin also closes the loop *after* a call, the way a safety circuit does:
+
+| ADK hook | What the interlock does |
+|---|---|
+| `before_tool_callback` | Policy check. Blocked calls never reach the tool. |
+| `after_tool_callback` | Runs the tool's `trip` rules on its result. A trip latches the E-stop; the model gets the result with the reason attached. |
+| `on_tool_error_callback` | Logs the fault. If the tool's class is in `estop_on_fault` (default `actuate`), latches the E-stop and returns a fault result. Other faults re-raise as before. |
+
+ADK runs `after_tool_callback` even when a before-callback blocked the call.
+Trips are only evaluated for calls the interlock let through and that
+returned normally, so a blocked call cannot trip a false E-stop
+(`tests/test_adk_e2e.py` runs this through a real ADK Runner with a scripted model).
+
+```toml
+[[tools.read_sensor.trip]]
+name = "light_curtain"
+when = { sensor = "light_curtain" }   # only for this sensor; keys must be declared params
+field = "value"                       # dotted path into the result, e.g. "reading.force_n"
+in = ["breached", "fault"]            # and/or min = ..., max = ...
+```
+
+A missing field, or a non-numeric value for a `min`/`max` trip, also trips.
+That is normally-closed wiring: no signal is a stop signal. Trips latch in
+observe mode too, like every E-stop.
+
+Per-agent alternative (gate only, no trips/faults):
+`LlmAgent(before_tool_callback=before_tool_callback(il))`.
 For a full runnable example, see `examples/adk_robot_agent.py` (needs `pip install -e ".[adk]"`
-and a Gemini API key or Vertex AI).
+and a Gemini API key or Vertex AI). `CELL_LIGHT_CURTAIN=breached` simulates a broken beam.
 
 ### MCP gateway (any MCP server, any language)
 
@@ -156,6 +182,7 @@ mode = "enforce"            # or "observe"
 lockout_after = 3           # violations within the window → lockout (0 = off)
 violation_window_s = 300
 estop_blocks = ["actuate"]
+estop_on_fault = ["actuate"]  # ADK plugin: a tool of these classes raising latches the E-stop
 
 [tools.move_arm]
 class = "actuate"           # read | write | actuate

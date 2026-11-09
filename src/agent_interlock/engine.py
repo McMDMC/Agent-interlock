@@ -181,6 +181,42 @@ class Interlock:
         else:
             self._locked_out, self._estop = apply(self._locked_out, self._estop)
 
+    # ------------------------------------------------------ after the call
+
+    def check_result(self, call: ToolCall, result: Any) -> str | None:
+        """Evaluate the tool's ``trip`` rules against what it returned.
+
+        Call this only for calls that actually ran. If a trip fires, the
+        E-stop latches (in observe mode too, like every E-stop) and the reason
+        is returned. Returns None when nothing tripped.
+        """
+        rule = self.policy.tools.get(call.tool)
+        if rule is None:
+            return None
+        for trip in rule.trips:
+            if trip.applies(call.args) and (why := trip.check(result)) is not None:
+                reason = f"trip {trip.name!r}: {why}"
+                self.audit.event("trip", agent=call.agent, tool=call.tool, trip=trip.name, why=why)
+                self.estop(source=f"{call.agent}/{call.tool}", reason=reason)
+                return reason
+        return None
+
+    def fault(self, call: ToolCall, error: BaseException) -> str | None:
+        """Record that a tool raised. Latch the E-stop if its class is in ``estop_on_fault``.
+
+        A drive that faults mid-move is in an unknown state, so the machine
+        stops. Returns the E-stop reason, or None if the fault did not latch it.
+        """
+        rule = self.policy.tools.get(call.tool)
+        tool_class = rule.tool_class if rule else None
+        err = f"{type(error).__name__}: {error}"[:300]
+        self.audit.event("tool_fault", agent=call.agent, tool=call.tool, error=err)
+        if tool_class not in self.policy.estop_on_fault:
+            return None
+        reason = f"{tool_class} tool {call.tool!r} faulted: {err}"
+        self.estop(source=f"{call.agent}/{call.tool}", reason=reason)
+        return reason
+
     # ------------------------------------------------------- operator actions
 
     def reload(self, policy: Policy, operator: str) -> None:
