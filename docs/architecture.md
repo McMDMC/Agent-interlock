@@ -16,7 +16,7 @@ flowchart TB
     end
 
     subgraph entry["Entry points"]
-        adk["adapters/adk.py<br/>InterlockPlugin<br/>before_tool_callback"]
+        adk["adapters/adk.py<br/>InterlockPlugin<br/>before / after / on_error"]
         gw["mcp_gateway.py<br/>McpGateway + run_stdio"]
         guard["guard.py<br/>@guarded"]
         cli["cli.py<br/>interlock ..."]
@@ -164,4 +164,4 @@ sequenceDiagram
 | `src/agent_interlock/cli.py` | `interlock` command |
 | `policies/robot_cell.toml` | Example policy for a robot cell |
 | `examples/` | Scripted demo, ADK agent, MCP robot server |
-| `tests/` | 66 tests incl. real ADK and MCP SDK interop |
+| `tests/` | 106 tests incl. real ADK (scripted-model end-to-end) and MCP SDK interop |

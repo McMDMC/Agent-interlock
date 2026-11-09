@@ -7,6 +7,10 @@ Setup:
 
 The plugin is registered on the App, so it covers every agent and sub-agent.
 When a call is blocked, the model gets the reason back as the tool result.
+
+Trip demo: a breached light curtain latches the E-stop, so the next move is blocked.
+    CELL_LIGHT_CURTAIN=breached python examples/adk_robot_agent.py
+Reset afterwards with `interlock reset --state cell-latch.json --operator <you>`.
 """
 
 import asyncio
@@ -32,12 +36,17 @@ def move_arm(x: float, y: float, z: float, speed: float) -> dict:
 
 def read_sensor(sensor: str) -> dict:
     """Read a cell sensor: force_torque, light_curtain or temp_spindle."""
+    # CELL_LIGHT_CURTAIN=breached simulates someone stepping into the cell.
+    if sensor == "light_curtain":
+        return {"sensor": sensor, "value": os.environ.get("CELL_LIGHT_CURTAIN", "clear")}
     return {"sensor": sensor, "value": "nominal"}
 
 
 async def main(prompt: str) -> None:
     interlock = Interlock.from_file(
-        ROOT / "policies" / "robot_cell.toml", audit=AuditLog("audit.jsonl")
+        ROOT / "policies" / "robot_cell.toml",
+        audit=AuditLog("audit.jsonl"),
+        state_path="cell-latch.json",  # the E-stop survives a restart of this script
     )
     agent = Agent(
         name="cell_operator",

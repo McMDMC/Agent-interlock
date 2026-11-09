@@ -7,6 +7,7 @@ mode = "enforce"            # "observe" = log only (E-stop and lockouts still en
 lockout_after = 3           # violations inside the window before the agent is locked out
 violation_window_s = 300
 estop_blocks = ["actuate"]  # tool classes frozen while the E-stop is latched
+estop_on_fault = ["actuate"]  # a moving tool that raises is in an unknown state: stop
 
 # --- read: sensors, no side effects -----------------------------------------
 [tools.read_joint_states]
@@ -15,6 +16,14 @@ class = "read"
 [tools.read_sensor]
 class = "read"
 params.sensor = { enum = ["force_torque", "light_curtain", "temp_spindle"] }
+
+# Trips read the tool's *result* (ADK plugin). If one fires, the E-stop latches.
+# A missing field trips too: no reading is treated like a broken beam.
+[[tools.read_sensor.trip]]
+name = "light_curtain"
+when = { sensor = "light_curtain" }
+field = "value"
+in = ["breached", "fault"]
 
 # --- actuate: anything that moves -------------------------------------------
 [tools.move_arm]
