@@ -120,6 +120,10 @@ and a Gemini API key or Vertex AI). `CELL_LIGHT_CURTAIN=breached` simulates a br
   so the model can correct itself.
 * **`tools/list`** is cut down to the tools the policy declares. The model
   never sees a tool it may not use. `--show-all` turns this off.
+* **Results** of calls it let through run the policy's `trip` rules against
+  `structuredContent`, the same rules the ADK plugin uses. An `isError`
+  result from a tool class in `estop_on_fault` latches the E-stop. Either
+  way the reason is appended to the result so the model sees it.
 
 Every forwarded message is re-serialised from what the gateway parsed, never
 passed through as raw bytes. A trick like duplicate JSON keys
@@ -150,6 +154,56 @@ Tested with the official MCP Python SDK 2.3.0 on both sides
 (`tests/test_mcp_sdk_interop.py`). `kill -HUP <pid>` reloads the policy
 without dropping the session. A broken policy is rejected, the old one stays
 active, and both outcomes are written to the audit log.
+
+### MCP gateway over Streamable HTTP (Cloud Run)
+
+`interlock mcp-http` is a reverse proxy for one MCP endpoint. It applies the
+same gating, filtering and trips, and relays JSON and SSE responses one
+re-serialised message at a time.
+
+```bash
+python examples/mcp_robot_server.py --http 8081           # the real server
+interlock mcp-http --policy policies/robot_cell.toml --agent planner-01 \
+    --upstream http://127.0.0.1:8081/mcp --listen 127.0.0.1:8080 \
+    --state latch.json --audit audit.jsonl                # clients use :8080/mcp
+```
+
+Spec 2026-07-28 mirrors body fields into headers (`Mcp-Method`, `Mcp-Name`,
+`Mcp-Param-*`) so load balancers and WAFs can route without reading JSON.
+That allows a split-brain bypass: the body says `read_sensor`, the header
+says `format_disk`, and whatever trusts the header acts on the wrong call.
+The gateway validates every mirrored header against the body *before* the
+policy check (spec: any server that processes the body MUST). A mismatch,
+a duplicated routing header or malformed base64 gets
+`400` / `-32020 HeaderMismatch`, is written to the audit log and is never
+forwarded. Upstream gets routing headers the gateway regenerated from the
+body it checked. `Mcp-Param-*` are checked against the tool's
+`x-mcp-header` schema, learned from `tools/list` (fetched on demand).
+
+Other guards: binds `127.0.0.1` by default; a request with an `Origin` not
+in `--allow-origin` gets `403` (DNS rebinding); bodies over `--max-body`
+get `413`; batches are refused. `Authorization` is passed through and
+`401` / `WWW-Authenticate` relayed, so OAuth flows still work. Earlier
+protocol revisions (`initialize`, `Mcp-Session-Id`, `GET` streams,
+`DELETE`) are relayed with the same gating. `GET /healthz` reports E-stop
+and lockout state. `--audit -` writes the hash chain to stdout as JSON
+lines, which Cloud Logging stores as structured `jsonPayload`.
+
+Tested with the official MCP Python SDK 2.3.0 client and server over real
+HTTP, both in 2026-07-28 mode and in legacy session mode
+(`tests/test_mcp_sdk_interop.py`). Header smuggling cases are in
+`tests/test_mcp_http.py`.
+
+**Cloud Run:** `deploy/cloudrun/service.yaml` runs the gateway as the
+ingress container and the MCP server as a sidecar on `127.0.0.1:8081`. The
+server has no route of its own, so every call goes through the interlock.
+The policy is mounted from Secret Manager. Callers authenticate with Cloud
+Run IAM.
+
+```bash
+docker build -t REGION-docker.pkg.dev/PROJECT_ID/agent-interlock/gateway:0.3.0 .
+gcloud run services replace deploy/cloudrun/service.yaml --region REGION
+```
 
 ## Operating it: E-stop, lockouts, reload
 
@@ -223,6 +277,7 @@ interlock check    policies/robot_cell.toml --tool move_arm --args '{"x":0.1,"y"
 interlock verify-audit audit.jsonl
 interlock bench    policies/robot_cell.toml --tool move_arm --args '{"x":0.1,"y":0.1,"z":0.4,"speed":0.1}'
 interlock mcp-proxy --policy ... -- <server command>
+interlock mcp-http  --policy ... --upstream http://127.0.0.1:8081/mcp
 interlock estop | reset | release | status --state latch.json
 ```
 
@@ -256,16 +311,24 @@ costs one append and one SHA-256.
   violation counters are per process.
 * Write one audit file per process. Two processes appending to the same
   file would interleave two hash chains.
-* The MCP gateway covers stdio. Streamable HTTP is not gated yet.
+* One gateway = one agent identity (`--agent`). Run one gateway per agent
+  if they need different rules.
+* On Cloud Run each instance has its own latch file, so the manifest pins
+  `maxScale: 1`. One E-stop domain across instances needs a shared backend
+  (roadmap).
+* Trips run on final `tools/call` results. A result that arrives through
+  the tasks extension (`tasks/result`) is not evaluated yet.
 
 ## Roadmap
 
 - [x] MCP gateway (stdio) in front of any MCP server
 - [x] Latches that persist and are shared across processes on a host
 - [x] Policy hot-reload with policy hash in the audit trail
-- [ ] MCP gateway for Streamable HTTP (Cloud Run deployment)
+- [x] MCP gateway for Streamable HTTP (Cloud Run deployment)
+- [x] Trips and actuator faults on MCP results (stdio + HTTP)
 - [ ] Shared state backend (Firestore / Redis) for multi-host
-- [ ] Cloud Logging audit sink
+- [x] Cloud Logging audit sink (`--audit -` → stdout → `jsonPayload`)
+- [ ] Gateway → upstream service-to-service auth (Cloud Run ID tokens)
 - [ ] ROS 2 adapter (gate `/cmd_vel`, action goals)
 - [ ] Policy export to OPA/Rego
 

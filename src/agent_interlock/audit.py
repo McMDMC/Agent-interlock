@@ -13,7 +13,7 @@ import json
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 from .decision import Decision
 
@@ -26,13 +26,24 @@ def _digest(prev: str, body: dict[str, Any]) -> str:
 
 
 class AuditLog:
-    """Append-only, hash-chained JSONL log. Pass path=None to keep it in memory."""
+    """Append-only, hash-chained JSONL log. Pass path=None to keep it in memory.
 
-    def __init__(self, path: str | Path | None = None) -> None:
+    ``stream=`` writes to an open text stream instead (e.g. ``sys.stdout`` on
+    Cloud Run, where each JSON line becomes a structured Cloud Logging entry).
+    A stream starts a fresh chain and is never closed by the log.
+    """
+
+    def __init__(self, path: str | Path | None = None, stream: IO[str] | None = None) -> None:
+        if path and stream:
+            raise ValueError("give path or stream, not both")
         self.path = Path(path) if path else None
         self.records: list[dict[str, Any]] = []
         self._lock = threading.Lock()
         self._prev = GENESIS
+        self._stream = stream
+        if stream is not None:
+            self._file: IO[str] | None = stream
+            return
         if self.path and self.path.exists():
             # Resume the chain from the last line of an existing log.
             last = None
@@ -52,14 +63,16 @@ class AuditLog:
             self._prev = record["hash"]
             if self._file:
                 self._file.write(json.dumps(record, default=str) + "\n")
+                if self._stream is not None:
+                    self._file.flush()
             else:
                 self.records.append(record)
         return record
 
     def close(self) -> None:
-        if self._file:
+        if self._file and self._stream is None:
             self._file.close()
-            self._file = None
+        self._file = None
 
     def decision(self, d: Decision) -> dict[str, Any]:
         return self.event(

@@ -142,3 +142,49 @@ def test_cli_proxy_and_shared_estop(tmp_path):
     by_id = {m["id"]: m for m in map(json.loads, proc.stdout.splitlines())}
     assert "E-stop latched: door open (from plc)" in by_id[1]["result"]["content"][0]["text"]
     assert by_id[2]["result"]["content"][0]["text"].startswith("EXECUTED read_sensor")
+
+
+# ------------------------------------------------- trips and faults on results
+
+
+def respond(g, id_, result):
+    line = json.dumps({"jsonrpc": "2.0", "id": id_, "result": result}).encode()
+    return json.loads(g.from_server(line))
+
+
+def test_trip_on_structured_result_latches_estop():
+    g = gw()
+    g.from_client(call(1, "read_sensor", {"sensor": "light_curtain"}))
+    out = respond(g, 1, {"content": [{"type": "text", "text": "x"}],
+                         "structuredContent": {"value": "breached"}})  # fmt: skip
+    assert "E-stop latched" in out["result"]["content"][-1]["text"]
+    assert g.interlock.estop_latched
+    _, reply = g.from_client(call(2, "move_arm", OK_MOVE))
+    assert "estop" in json.loads(reply)["result"]["content"][0]["text"]
+
+
+def test_clear_reading_and_unrelated_responses_do_not_trip():
+    g = gw()
+    g.from_client(call(1, "read_sensor", {"sensor": "light_curtain"}))
+    respond(g, 1, {"content": [], "structuredContent": {"value": "clear"}})
+    respond(g, 99, {"content": [], "structuredContent": {}})  # id we never forwarded
+    g.from_client(call(2, "read_sensor", {"sensor": "light_curtain"}))
+    respond(g, 2, {"resultType": "input_required", "inputRequests": {}})  # not final yet
+    assert not g.interlock.estop_latched
+
+
+def test_missing_reading_trips_normally_closed():
+    g = gw()
+    g.from_client(call(1, "read_sensor", {"sensor": "light_curtain"}))
+    respond(g, 1, {"content": [{"type": "text", "text": "no json here"}]})
+    assert g.interlock.estop_latched
+
+
+def test_actuator_error_result_latches_estop_but_read_error_does_not():
+    g = gw()
+    g.from_client(call(1, "read_sensor", {"sensor": "temp_spindle"}))
+    respond(g, 1, {"content": [{"type": "text", "text": "sensor offline"}], "isError": True})
+    assert not g.interlock.estop_latched
+    g.from_client(call(2, "move_arm", OK_MOVE))
+    out = respond(g, 2, {"content": [{"type": "text", "text": "servo fault"}], "isError": True})
+    assert g.interlock.estop_latched and "servo fault" in out["result"]["content"][-1]["text"]

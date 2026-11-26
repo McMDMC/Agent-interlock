@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-interlock"
-version = "0.2.0"
+version = "0.3.0"
 description = "Safety interlock for AI agent tool calls: policy-gated, fail-closed, with lockout, E-stop and a tamper-evident audit trail."
 readme = "README.md"
 requires-python = ">=3.11"
