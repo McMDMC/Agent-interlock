@@ -1,0 +1,53 @@
+# Cloud Run: gateway as the ingress container, MCP server as a sidecar.
+# The server listens on localhost only, so the gateway is the one way in.
+#
+#   gcloud run services replace deploy/cloudrun/service.yaml --region REGION
+#
+# Replace REGION, PROJECT_ID and the server image. Keep the service private
+# (no allUsers invoker); callers authenticate with Cloud Run IAM.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: robot-cell-mcp
+spec:
+  template:
+    metadata:
+      annotations:
+        # Start the MCP server before the gateway that fronts it.
+        run.googleapis.com/container-dependencies: "{gateway: [mcp-server]}"
+        # Latches live in each instance's /tmp. One instance = one E-stop
+        # domain until a shared backend exists (see README "Limits").
+        autoscaling.knative.dev/maxScale: "1"
+    spec:
+      containers:
+        - name: gateway
+          image: REGION-docker.pkg.dev/PROJECT_ID/agent-interlock/gateway:0.3.0
+          ports:
+            - containerPort: 8080
+          args:
+            - --policy=/policy/robot_cell.toml
+            - --upstream=http://127.0.0.1:8081/mcp
+            - --agent=planner-01
+            - --state=/tmp/latch.json
+            - --audit=-              # JSON lines on stdout -> Cloud Logging jsonPayload
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+          volumeMounts:
+            - name: policy
+              mountPath: /policy
+        - name: mcp-server
+          image: REGION-docker.pkg.dev/PROJECT_ID/agent-interlock/robot-server:latest
+          # Must bind 127.0.0.1:8081 (sidecars share the network namespace).
+          startupProbe:
+            tcpSocket:
+              port: 8081
+      volumes:
+        - name: policy
+          secret:
+            # Policy from Secret Manager: change it without rebuilding the image.
+            secretName: robot-cell-policy
+            items:
+              - key: latest
+                path: robot_cell.toml

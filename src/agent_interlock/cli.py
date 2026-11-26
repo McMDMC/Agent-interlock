@@ -88,6 +88,28 @@ def _mcp_proxy(a: argparse.Namespace) -> int:
     return run_stdio(gw, a.command, policy_path=a.policy)
 
 
+def _mcp_http(a: argparse.Namespace) -> int:
+    import os
+
+    from .mcp_gateway import McpGateway
+    from .mcp_http import HttpGateway, serve_http
+
+    listen = a.listen or (f"0.0.0.0:{os.environ['PORT']}" if "PORT" in os.environ else None)
+    host, _, port = (listen or "127.0.0.1:8080").rpartition(":")
+    log = audit.AuditLog(stream=sys.stdout) if a.audit == "-" else audit.AuditLog(a.audit)
+    il = Interlock(Policy.from_file(a.policy), audit=log, state_path=a.state)
+    gw = HttpGateway(
+        McpGateway(il, agent=a.agent, hide_unlisted=not a.show_all),
+        upstream=a.upstream,
+        path=a.path,
+        allowed_origins=a.allow_origin,
+        max_body=a.max_body,
+        timeout=a.timeout,
+    )
+    serve_http(gw, host.strip("[]") or "127.0.0.1", int(port), policy_path=a.policy)
+    return 0
+
+
 def _latch_op(a: argparse.Namespace) -> int:
     store = LatchStore(a.state)
     log = audit.AuditLog(a.audit) if a.audit else None
@@ -144,6 +166,26 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--show-all", action="store_true", help="don't hide tools missing from policy")
     m.add_argument("command", nargs=argparse.REMAINDER)
     m.set_defaults(fn=_mcp_proxy)
+
+    h = sub.add_parser("mcp-http", help="gate a Streamable HTTP MCP server (reverse proxy)")
+    h.add_argument("--policy", required=True)
+    h.add_argument(
+        "--upstream", required=True, help="MCP endpoint URL, e.g. http://127.0.0.1:8081/mcp"
+    )
+    h.add_argument("--agent", default="mcp-client", help="agent identity used in the policy")
+    h.add_argument(
+        "--listen", default=None, help="host:port (default 127.0.0.1:8080, or 0.0.0.0:$PORT)"
+    )
+    h.add_argument("--path", default="/mcp", help="endpoint path served by the gateway")
+    h.add_argument(
+        "--allow-origin", action="append", default=[], help="allowed Origin (repeatable)"
+    )
+    h.add_argument("--max-body", type=int, default=1 << 20, help="max request body in bytes")
+    h.add_argument("--timeout", type=float, default=300.0, help="upstream socket timeout (s)")
+    h.add_argument("--audit", default="interlock-audit.jsonl", help="audit file, or - for stdout")
+    h.add_argument("--state", default=None, help="shared latch file (lockouts, E-stop)")
+    h.add_argument("--show-all", action="store_true", help="don't hide tools missing from policy")
+    h.set_defaults(fn=_mcp_http)
 
     for name, helptext in (
         ("status", "show latched E-stop and lockouts"),

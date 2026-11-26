@@ -27,3 +27,14 @@ jobs:
       - run: interlock validate policies/robot_cell.toml
       - run: python examples/robot_cell_demo.py
       - run: interlock bench policies/robot_cell.toml --tool move_arm --args '{"x":0.1,"y":0.1,"z":0.4,"speed":0.1}'
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build -t agent-interlock:ci .
+      - name: gateway starts, honours PORT, answers /healthz
+        run: |
+          docker run -d --name gw -e PORT=9090 -p 9090:9090 agent-interlock:ci
+          for i in $(seq 1 30); do curl -fsS localhost:9090/healthz && exit 0; sleep 1; done
+          docker logs gw; exit 1
